@@ -1,0 +1,108 @@
+Created a mini circular linked list library with create_tcb, and add_to_queue (Implementation 
+from https://www.tutorialspoint.com/data_structures_algorithms/doubly_linked_list_algorithm.htm). 
+The create_tcb function creates a new thread control block and stores the information in a struct called tcb.
+This tcb struct is part of a larger struct called thread_t which holds the stack ptr and the next 
+node in the ll in addition to the tcb.
+
+add_to_queue adds the given node (thread_t) into the end of the circular ll and returns the new head.
+
+In pthread_create it first checks if this is the first time creating a thread and moves to the setup_threads
+function which sets up the main thread. The main thread is the currently executing process and thus does not
+need a custom stack, so the only thing needed is to use setjmp. After we set up the SIGALRM which goes off 
+every 50ms and set schedule as the handler. Implementation of SIGALRM from 
+https://stackoverflow.com/questions/31919247/c-signal-handler 
+
+Subsequent process are set up in pthread_create.
+
+The stack of the process in created with malloc which returns the pointer to the beginning of the stack.
+But since the stack grows down we need to add 32767 (Stack size) to the pointer to get to the top, and 
+subtract 8 (calling convention).
+
+                                        ----------- 0xfffff
+new_thread->stack_ptr + STACK_SZ - 8 -> -----------    |
+                                            .       STACK_SZ
+                                            .          |
+                                            .          |
+               new_thread->stack_ptr -> ----------- 0x00000
+
+After that, to the location of the stack ptr we insert the address of pthread_exit which gets popped into 
+RIP as the next instruction.
+
+**** I was stuck on the stack part for a while because i forgot the stack grows from top to bottom 
+and drawing a stack diagram after some research helped ****
+
+According to the instructions we add the stack_ptr to RSP and start_thunk into PC (after casting to unsigned long
+and mangling it). Also we add arg into R13 and start_routine into R12.
+
+The scedule section first checks in setjmp is 0 to make sure its the first time calling setjmp.
+it enters a do while loop which goes to the next process that has not exited and longjmps to it.
+--------------------------------------------------------------------------------------------------------------------------
+pthread_join: 
+First i made a temparary variable that looks for the thread that the calling
+thread is trying to join to. Then set the status of the calling thread as blocked and store 
+the thread that the calling thread is waiting for. I then called schedule and in schedule i have a 
+helper function check the status of the waiting thread, if a thread does not have a waiting thread its
+wait_thread variable will be -1 (this is done so that only callings threads will be checked). If the status 
+of the waiting thread is EXITED, the status of the calling thread is changed to READY.
+
+sem_init:
+Initialize a new semaphore struct that stores the value of the semaphore, the head to a queue that holds
+waiting threads that have tried to call sem wait but got blocked, and a flag to indicate a initialized semaphore.
+
+sem_wait:
+First check if the semaphore value is greater then 0, if it is then decrement the value and return 
+immediatly. If the semaphore value is 0, then check if the head of the wait queue (wq_head) is NULL, if
+so store the first thread id in the queue. If its not NULL, traverse the queue and store the thread id 
+at the end, and set the current thread state to SEM_WAIT state in which the scheduler will ignore it.
+
+sem_post:
+If the wq_head is not NULL, set the status of the thread that is on the top of the list to READY, and 
+make wq_head the next item in the list. Increment the semaphore value.
+
+--------------------------------------------------------------------------------------------------------------------------
+
+To store TLS object, i used a hashmap which maps a thread id to a array index for easy access.
+Initially i used a array but checking if an tid exists in the array is much more difficult and
+leff efficient using that method.
+
+To facilitate the hasing implementation i created hash_init, hash_add, hash_get, hash_exists, 
+and hash_remove for basic hasing functionality.
+
+** tls_create **
+Handle some errors: 
+If the hash already exists the return value is -1.
+
+First, to find the number of pages we need, we must round up the given size. To do this
+i used this formula: 1 + (size - 1) / page_size. Then i initialized a TLS block and assigned
+the metadata required. Finally, depending on the number of pages, i stored the address of an
+empy mmap call (page) into the array of pages.
+
+** tls_write **
+Handle some errors:
+- check if tid aready exists by using hash_exists function.
+- Also check if length of buffer goes over the allocated page, i.e offset + length > size
+
+First we unprotect each page block to be able to write into it, after performing the 
+write action we protect it again. 
+
+We loop over the pages bit by bit but getting the offset and index through simple calculations.
+if the ref count is 1, that means the page is not shared so we just copy over the data.
+
+If the ref count is > 1, we need to implement copy on write semantics so we create a new page and 
+store the reference to it in the current page array. Finally we copy over all the data into the copied
+page.  
+
+** tls_read **
+Handle some errors:
+- check if tid aready exists by using hash_exists function.
+- Also check if length of buffer goes over the allocated page, i.e offset + length > size
+
+Similar to write we protect, read then unprotect the blocks.
+
+** tls_clone **
+Handle some errors:
+- if a TLS exists for the calling thread we exit, because we are clining into it.
+- if a TLS does not exist for the target thread we exit because we have nothing to clone.
+
+First we copy all the metadata into the current thread, then we copy all the page addresses into
+the pages array.
